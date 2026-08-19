@@ -123,3 +123,10 @@ struct common_sampler_deleter {
 };
 
 typedef std::unique_ptr<common_sampler, common_sampler_deleter> common_sampler_ptr;
+
+// get forced (fast-forward) tokens from the grammar, if any
+// Only applies to JSON-derived grammars (json_schema, tool_calls).
+// Walks the grammar at character level to find singular paths,
+// returns empty vector if no forced tokens, no grammar, lazy grammar, or non-JSON grammar
+std::vector<llama_token> common_sampler_get_ff_tokens(struct common_sampler * gsmpl, struct llama_context * ctx);
+

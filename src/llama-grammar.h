@@ -6,6 +6,7 @@
 #include <regex>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 struct llama_vocab;
 
@@ -148,6 +149,10 @@ struct llama_grammar {
                              trigger_patterns;         // Regular expressions that trigger a lazy grammar. Must be a full match of the entire generated
                                                        // string, and the grammar will be given the string from the first match group onwards.
 
+    // cache for forced-string lookups: key is a hash of stack tops, value is the forced string
+    // avoids re-walking the grammar every decode step when the state repeats (e.g. array items)
+    std::unordered_map<size_t, std::string> ff_cache;
+
 };
 
 //
@@ -183,6 +188,8 @@ void llama_grammar_apply_impl(
 void llama_grammar_accept_impl(
               struct llama_grammar & grammar,
                        llama_token   token);
+
+std::string llama_grammar_get_forced_string(const struct llama_grammar & grammar);
 
 void llama_grammar_accept_str(
               struct llama_grammar & grammar,

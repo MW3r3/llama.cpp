@@ -44,3 +44,7 @@ struct llama_sampler * llama_sampler_init_dry_testing(
         int32_t dry_allowed_length,
         int32_t dry_penalty_last_n,
         const std::vector<std::vector<llama_token>> & seq_breakers);
+
+// get the grammar object from a grammar sampler, or null if not a grammar sampler
+struct llama_grammar * llama_sampler_get_grammar(struct llama_sampler * smpl);
+

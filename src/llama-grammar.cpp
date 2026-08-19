@@ -1452,6 +1452,123 @@ void llama_grammar_accept_impl(struct llama_grammar & grammar, llama_token token
     llama_grammar_accept_token(grammar, token, piece);
 }
 
+
+// Walk grammar at character level to find forced (singular) path.
+// JSON-aware: at branch points with one structural char and rest whitespace,
+// pick the structural char (compact JSON).
+// Returns forced string, or empty if no forced path.
+// Works on a clone, does not mutate original grammar.
+std::string llama_grammar_get_forced_string(const struct llama_grammar & grammar_src) {
+    // compute a hash of the current stack state for cache lookup
+    // the stack top pointers uniquely identify the grammar position
+    // (rules are immutable, so pointers are stable)
+    size_t state_hash = 0;
+    for (const auto & stack : grammar_src.stacks) {
+        if (!stack.empty()) {
+            // hash combine
+            state_hash ^= std::hash<const void*>{}(stack.back()) + 0x9e3779b9 + (state_hash << 6) + (state_hash >> 2);
+        }
+    }
+    // also include partial_utf8 in the hash (affects which chars are valid)
+    state_hash ^= std::hash<uint32_t>{}(grammar_src.partial_utf8.value) + 0x9e3779b9 + (state_hash << 6) + (state_hash >> 2);
+    state_hash ^= std::hash<uint32_t>{}(grammar_src.partial_utf8.n_remain) + 0x9e3779b9 + (state_hash << 6) + (state_hash >> 2);
+
+    // check cache
+    auto it = grammar_src.ff_cache.find(state_hash);
+    if (it != grammar_src.ff_cache.end()) {
+        return it->second;
+    }
+
+    // cache miss: do the full walk
+    llama_grammar g = *llama_grammar_clone_impl(grammar_src);
+    std::string forced;
+
+    for (int step = 0; step < 512; step++) {
+        // check which chars are accepted by looking at stack tops
+        std::vector<uint32_t> accepted;
+
+        for (const auto & stack : g.stacks) {
+            if (stack.empty()) {
+                continue;
+            }
+            const llama_grammar_element * pos = stack.back();
+
+            if (pos->type == LLAMA_GRETYPE_CHAR || pos->type == LLAMA_GRETYPE_CHAR_NOT ||
+                pos->type == LLAMA_GRETYPE_CHAR_ANY) {
+                for (uint32_t c = 1; c < 128; c++) {
+                    auto match = llama_grammar_match_char(pos, c);
+                    if (match.first) {
+                        if (std::find(accepted.begin(), accepted.end(), c) == accepted.end()) {
+                            accepted.push_back(c);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (accepted.empty()) {
+            break;
+        }
+
+        uint32_t chosen = 0;
+
+        if (accepted.size() == 1) {
+            chosen = accepted[0];
+        } else {
+            // branch point: if there's exactly 1 non-whitespace option and the
+            // rest are whitespace, pick the non-whitespace one (compact output).
+            // This is safe for any grammar where whitespace is optional formatting.
+            uint32_t structural = 0;
+            int n_struct = 0;
+            int n_ws = 0;
+            for (uint32_t c : accepted) {
+                if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                    n_ws++;
+                } else {
+                    structural = c;
+                    n_struct++;
+                }
+            }
+            if (n_struct == 1 && n_ws > 0) {
+                chosen = structural;
+            } else if (n_struct > 1 && n_ws > 0 && !forced.empty()) {
+                // multiple non-whitespace options + whitespace option
+                // if last forced char was ':', pick space to keep separation
+                // between key and value (improves number tokenization)
+                if (forced.back() == ':') {
+                    chosen = ' ';
+                }
+            }
+        }
+
+        if (chosen == 0) {
+            break;
+        }
+
+        // append char as UTF-8
+        if (chosen < 0x80) {
+            forced += (char)chosen;
+        } else if (chosen < 0x800) {
+            forced += (char)(0xC0 | (chosen >> 6));
+            forced += (char)(0x80 | (chosen & 0x3F));
+        } else {
+            forced += (char)(0xE0 | (chosen >> 12));
+            forced += (char)(0x80 | ((chosen >> 6) & 0x3F));
+            forced += (char)(0x80 | (chosen & 0x3F));
+        }
+
+        llama_grammar_accept(&g, chosen);
+    }
+
+    // store in cache (cast away const for the cache, which is a mutable optimization)
+    auto & cache = const_cast<struct llama_grammar &>(grammar_src).ff_cache;
+    if (cache.size() < 1024) {  // limit cache size to prevent unbounded growth
+        cache[state_hash] = forced;
+    }
+
+    return forced;
+}
+
 void llama_grammar_accept_str(struct llama_grammar & grammar, const std::string & piece) {
     // Note terminating 0 in decoded string
     const auto   decoded     = decode_utf8(piece, grammar.partial_utf8);

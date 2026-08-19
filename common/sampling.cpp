@@ -1,6 +1,8 @@
 #include "sampling.h"
 
 #include "common.h"
+#include "../src/llama-grammar.h"
+#include "../src/llama-sampler.h"
 #include "fit.h"
 #include "log.h"
 #include "reasoning-budget.h"
@@ -536,6 +538,42 @@ void common_sampler_copy(const common_sampler * src, common_sampler * dst) {
     dst->cur_p      = src->cur_p;
     dst->cur_p.data = src->cur_p.data ? dst->cur.data() : nullptr; // re-point to dst's buffer
     dst->t_total_us = src->t_total_us;
+}
+
+
+std::vector<llama_token> common_sampler_get_ff_tokens(struct common_sampler * gsmpl, struct llama_context * ctx) {
+    if (!gsmpl || !gsmpl->grmr) {
+        return {};
+    }
+
+    struct llama_grammar * grammar = llama_sampler_get_grammar(gsmpl->grmr);
+    if (!grammar) {
+        return {};
+    }
+
+    // skip if grammar is lazy and not yet triggered
+    if (grammar->awaiting_trigger) {
+        return {};
+    }
+
+    // only apply forced tokens for JSON-derived grammars
+    // (json_schema or tool_calls), not for user-provided custom GBNF
+    // the whitespace heuristic and grammar walk are tuned for JSON structure
+    // and can produce incorrect results with arbitrary GBNF grammars
+    if (gsmpl->params.grammar.type != COMMON_GRAMMAR_TYPE_OUTPUT_FORMAT &&
+        gsmpl->params.grammar.type != COMMON_GRAMMAR_TYPE_TOOL_CALLS) {
+        return {};
+    }
+
+    std::string forced = llama_grammar_get_forced_string(*grammar);
+    if (forced.empty()) {
+        return {};
+    }
+
+    const struct llama_vocab * vocab = llama_model_get_vocab(llama_get_model(ctx));
+    llama_tokens tokens = common_tokenize(vocab, forced, false, true);
+
+    return tokens;
 }
 
 void common_perf_print(const struct llama_context * ctx, const struct common_sampler * gsmpl) {

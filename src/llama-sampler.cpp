@@ -2685,6 +2685,19 @@ static void llama_sampler_grammar_apply(struct llama_sampler * smpl, llama_token
 }
 
 // Fwd declare to break reset --> init_impl --> llama_sampler_grammar_i --> reset cycle.
+
+struct llama_grammar * llama_sampler_get_grammar(struct llama_sampler * smpl) {
+    if (!smpl || !smpl->iface) {
+        return nullptr;
+    }
+    // check if this is a grammar sampler by name
+    if (std::string(smpl->iface->name(smpl)) != "grammar") {
+        return nullptr;
+    }
+    auto * ctx = (llama_sampler_grammar *) smpl->ctx;
+    return ctx ? ctx->grammar : nullptr;
+}
+
 static struct llama_sampler * llama_sampler_init_grammar_impl(
         const struct llama_vocab * vocab,
                       const char * grammar_str,

@@ -209,6 +209,7 @@ struct server_slot {
     common_speculative * spec;
 
     llama_tokens spec_draft;
+    llama_tokens ff_tokens;
     llama_tokens spec_prompt;
     std::vector<int32_t> spec_i_batch;
     common_prompt_checkpoint spec_ckpt;
@@ -338,6 +339,7 @@ struct server_slot {
         if (can_speculate()) {
             spec_draft.clear();
             spec_i_batch.clear();
+            ff_tokens.clear();
             spec_ckpt.clear();
         }
         generated_tokens.clear();
@@ -461,13 +463,27 @@ struct server_slot {
     void handle_last_sampled_token(server_batch & batch) {
         bool add_ok = true;
         if (spec_draft.empty()) {
-            // no speculative decoding
+            auto pos0 = prompt.tokens.pos_next();
+
+            // when there are forced tokens, the sampled token doesn't need logits
+            // only the last forced token needs logits for the next sampling step
+            bool sampled_needs_logits = ff_tokens.empty();
+
             i_batch = batch.size();
 
             if (!inp_embd.empty()) {
-                add_ok &= batch.add(id, inp_embd, prompt.tokens.pos_next(), true, false);
+                add_ok &= batch.add(id, inp_embd, pos0++, sampled_needs_logits, false);
             } else {
-                add_ok &= batch.add(id, sampled, prompt.tokens.pos_next(), true, false);
+                add_ok &= batch.add(id, sampled, pos0++, sampled_needs_logits, false);
+            }
+
+            // add forced tokens to the batch (logits=false except last)
+            for (size_t fi = 0; fi < ff_tokens.size(); fi++) {
+                bool need_logits = (fi == ff_tokens.size() - 1);
+                if (need_logits) {
+                    i_batch = batch.size();
+                }
+                add_ok &= batch.add(id, ff_tokens[fi], pos0++, need_logits, false);
             }
 
             SLT_DBG(*this, "slot decode token, id=%d, n_ctx = %d, n_tokens = %d, truncated = %d\n",
@@ -494,7 +510,9 @@ struct server_slot {
         GGML_ASSERT(add_ok && "batch must be large enough to hold the sampled and draft tokens");
 
         prompt.tokens.push_back(sampled);
+        prompt.tokens.insert(ff_tokens);
         prompt.tokens.insert(spec_draft);
+        ff_tokens.clear();
     }
 
     void release() {
@@ -3795,6 +3813,26 @@ private:
                 slot.release();
 
                 return;
+            }
+
+            // jump-forward: get grammar-forced tokens and process them
+            // the grammar walk picks the compact JSON path, so tokens are canonical
+            slot.ff_tokens = common_sampler_get_ff_tokens(slot.smpl.get(), slot.ctx_tgt);
+            for (auto ftok : slot.ff_tokens) {
+                common_sampler_accept(slot.smpl.get(), ftok, true);
+                slot.sampled = ftok;
+
+                completion_token_output fresult;
+                fresult.tok          = ftok;
+                fresult.text_to_send = common_token_to_piece(slot.ctx_tgt, ftok, accept_special_token(slot, ftok));
+                fresult.prob         = 1.0f;
+
+                if (!process_token(fresult, slot)) {
+                    slot.print_timings();
+                    send_final_response(slot);
+                    slot.release();
+                    return;
+                }
             }
 
             slot.print_timings_tg();
